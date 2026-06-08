@@ -146,3 +146,46 @@ Annually compounded zero rate: $z(T) = DF(T)^{-1/T} - 1$
 | Bear flattener | +50 | +150 | Term premium rise, recession risk |
 | Bull flattener | -50 | -150 | Growth fear, long rates rally |
 | Twist | +75 | -75 | Butterfly: 2Y up, 10Y down |
+
+## Sources
+
+### Data
+
+- [FRED API Documentation](https://fred.stlouisfed.org/docs/api/fred/)
+- [FRED Treasury Constant Maturity series](https://fred.stlouisfed.org/categories/115)
+- [fredapi Python library (GitHub)](https://github.com/mortada/fredapi)
+- [fredapi on PyPI](https://pypi.org/project/fredapi/)
+
+### Bootstrapping
+
+- [Bootstrapping (finance) — Wikipedia](https://en.wikipedia.org/wiki/Bootstrapping_(finance))
+- [Constructing a zero-coupon yield curve — Treasury Today](https://treasurytoday.com/treasury-practice/constructing-a-zero-coupon-yield-curve/)
+- [How We Bootstrap the Yield Curve — BlueGamma](https://www.bluegamma.io/documentation/methodology/how-to-bootstrap-the-yield-curve)
+
+### Interpolation
+
+- [Interest Rate Interpolation — Society of Actuaries](https://www.soa.org/sections/financial-reporting/financial-reporting-newsletter/2022/february/fr-2022-02-perelman/)
+- [Testing Cubic Splines vs Nelson-Siegel for Zero-Coupon Yield Curve Estimation — Academia.edu](https://www.academia.edu/52812972/Testing_the_Performance_of_Cubic_Splines_and_Nelson_Siegel_Model_for_Estimating_the_Zero_coupon_Yield_Curve)
+
+### Risk analytics (DV01, duration, convexity)
+
+- [DV01 Explained — WallStreetMojo](https://www.wallstreetmojo.com/dv01/)
+- [Duration, DV01, and Convexity — Close Mountain Capital](https://www.closemountain.com/papers/risktransform1.pdf)
+
+### Shock scenario references
+
+- [Yield Curve Shock Scenarios — yieldcurve.pro](https://www.yieldcurve.pro/scenarios/bear-flattener)
+- [Yield Curve Strategies: Steepeners, Flatteners, and More — IR Structure](https://irstructure.com/yield-curve-strategies-steepeners-flatteners-and-more/)
+
+### Nelson-Siegel / NSS
+
+- [Complete Guide to the Nelson-Siegel Model — NumberAnalytics](https://www.numberanalytics.com/blog/complete-guide-nelson-siegel-model)
+- [Smoothed Bootstrap and Nelson-Siegel Revisited — EFMA 2010](https://www.efmaefm.org/0EFMAMEETINGS/EFMA%20ANNUAL%20MEETINGS/2010-Aarhus/papers/Smoothed_Bootstrap_-_Nelson-Siegel_Revisited_June_2010.pdf)
+- [Calibrating Nelson-Siegel-Svensson via Genetic Algorithm — arXiv](https://arxiv.org/pdf/2108.01760)
+- [Nelson-Siegel-Svensson Python package — GitHub](https://github.com/open-source-modelling/Nelson_Siegel_Svansson_python)
+
+### Libraries
+
+- [QuantLib Python yield term structures documentation](https://quantlib-python-docs.readthedocs.io/en/latest/termstructures/yield.html)
+- [QuantLib bootstrapping tutorial — Goutham Balaraman](http://gouthamanbalaraman.com/blog/quantlib-term-structure-bootstrap-yield-curve.html)
+- [RatesLib documentation](https://rateslib.com/py/en/1.0.x/z_quantlib.html)
