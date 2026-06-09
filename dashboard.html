@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+  <title>Yield Curve Explorer Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.73.0/build/stlite.css" />
+  <style>
+    html, body, #root { height: 100%; margin: 0; padding: 0; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.73.0/build/stlite.js"></script>
+  <script>
+stlite.mount(
+  {
+    requirements: ["plotly", "scipy"],
+    entrypoint: "streamlit_app.py",
+    files: {
+      "streamlit_app.py": `
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from scipy.interpolate import CubicSpline
+from scipy.optimize import brentq
+
+st.set_page_config(page_title="Yield Curve Explorer", layout="wide", page_icon="📈")
+st.title("📈 Yield Curve Explorer")
+st.caption("Synthetic US Treasury curve · Bootstrap · Interpolation · Shock Scenarios · Bond Analytics — runs in-browser via stlite (no server required)")
+
+# ── Curve presets ──────────────────────────────────────────────────────────────
+_TENOR_YEARS  = [1/12, 3/12, 6/12, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0]
+_TENOR_LABELS = ["1M", "3M", "6M", "1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"]
+
+_PRESETS = {
+    "Inverted (2023-like)": [0.0530, 0.0530, 0.0525, 0.0515, 0.0495, 0.0485, 0.0475, 0.0465, 0.0460, 0.0470, 0.0460],
+    "Normal (steep)":       [0.0100, 0.0120, 0.0150, 0.0200, 0.0255, 0.0295, 0.0330, 0.0355, 0.0375, 0.0415, 0.0430],
+    "Flat":                 [0.0450, 0.0450, 0.0450, 0.0450, 0.0450, 0.0450, 0.0450, 0.0450, 0.0450, 0.0450, 0.0450],
+    "Humped":               [0.0300, 0.0325, 0.0360, 0.0400, 0.0460, 0.0500, 0.0520, 0.0510, 0.0490, 0.0465, 0.0450],
+}
+
+# ── Bootstrap ──────────────────────────────────────────────────────────────────
+
+def _idf(t, cache):
+    """Log-linear interpolation of discount factor from cache dict."""
+    if t in cache:
+        return cache[t]
+    known = sorted(cache.keys())
+    if t <= known[0]:
+        return cache[known[0]] ** (t / known[0])
+    t_lo = max(k for k in known if k <= t)
+    hi   = [k for k in known if k > t]
+    if not hi:
+        return cache[t_lo]
+    t_hi  = min(hi)
+    alpha = (t - t_lo) / (t_hi - t_lo)
+    return float(np.exp((1 - alpha) * np.log(cache[t_lo]) + alpha * np.log(cache[t_hi])))
+
+@st.cache_data
+def bootstrap(par_tuple):
+    par_dict = dict(zip(_TENOR_YEARS, par_tuple))
+    tenors, zeros, dfs = [], [], []
+    cache = {}
+    for T, c in sorted(par_dict.items()):
+        if T <= 0.5:
+            df = 1.0 / (1.0 + c * T)
+        else:
+            dates  = np.round(np.arange(0.5, T + 1e-9, 0.5), 8)
+            pv     = sum(c / 2 * 100 * _idf(d, cache) for d in dates[:-1])
+            df     = (100.0 - pv) / (100.0 * (1.0 + c / 2.0))
+        cache[T] = df
+        tenors.append(T)
+        zeros.append(df ** (-1.0 / T) - 1.0)
+        dfs.append(df)
+    return np.array(tenors), np.array(zeros), np.array(dfs)
+
+def build_zero_fn(tenors, zeros, dfs, method):
+    log_df = np.log(dfs)
+    if method == "linear_zero":
+        def fn(t):
+            return np.interp(np.asarray(t, float), tenors, zeros)
+    elif method == "cubic_zero":
+        cs = CubicSpline(tenors, zeros, bc_type="not-a-knot")
+        def fn(t):
+            return np.asarray(cs(t), float)
+    elif method == "log_linear_df":
+        def fn(t):
+            t_a  = np.asarray(t, float)
+            ldf  = np.interp(t_a, tenors, log_df)
+            return np.exp(ldf) ** (-1.0 / t_a) - 1.0
+    else:
+        cs = CubicSpline(tenors, log_df, bc_type="not-a-knot")
+        def fn(t):
+            t_a = np.asarray(t, float)
+            return np.exp(cs(t_a)) ** (-1.0 / t_a) - 1.0
+    return fn
+
+def fwd_curve(zero_fn, t_grid, step=0.1):
+    fwd = np.zeros(len(t_grid))
+    for i, t in enumerate(t_grid):
+        lo = t - step
+        hi = t
+        if lo < t_grid[0]:          # left boundary: use forward difference
+            lo, hi = t, min(t + step, t_grid[-1])
+        z_hi = float(zero_fn(np.array([hi]))[0])
+        z_lo = float(zero_fn(np.array([lo]))[0])
+        df_hi = (1.0 + z_hi) ** (-hi)
+        df_lo = (1.0 + z_lo) ** (-lo)
+        fwd[i] = -np.log(df_hi / df_lo) / (hi - lo)
+    return fwd
+
+# ── Shock profiles ─────────────────────────────────────────────────────────────
+_SHOCK_PROFILES = {
+    "parallel_up":    (100,   100),
+    "parallel_down":  (-100, -100),
+    "bear_steepener": (150,   50),
+    "bull_steepener": (-150, -50),
+    "bear_flattener": (50,   150),
+    "bull_flattener": (-50, -150),
+    "twist":          (75,   -75),
+}
+_SHOCK_COLORS = {
+    "parallel_up":    "#EF553B",
+    "parallel_down":  "#636EFA",
+    "bear_steepener": "#FF7F0E",
+    "bull_steepener": "#1F77B4",
+    "bear_flattener": "#D62728",
+    "bull_flattener": "#2CA02C",
+    "twist":          "#9467BD",
+}
+
+def shocked_zero_fn(zero_fn, shock_name, mag):
+    short_bps, long_bps = _SHOCK_PROFILES[shock_name]
+    scale  = mag / 100.0
+    t_nod  = np.array([0.25, 2.0, 10.0, 30.0])
+    s_nod  = np.array([short_bps * scale / 10000.0,
+                       short_bps * scale / 10000.0,
+                       long_bps  * scale / 10000.0,
+                       long_bps  * scale / 10000.0])
+    def fn(t):
+        t_a = np.asarray(t, float)
+        return np.asarray(zero_fn(t_a), float) + np.interp(t_a, t_nod, s_nod)
+    return fn
+
+# ── Bond analytics ─────────────────────────────────────────────────────────────
+
+def bond_cashflows(coupon, maturity):
+    periods = round(maturity * 2)
+    times   = np.arange(1, periods + 1) * 0.5
+    cf      = np.full(periods, coupon / 2 * 100.0)
+    cf[-1] += 100.0
+    return times, cf
+
+def bond_price(coupon, maturity, zero_fn):
+    times, cf = bond_cashflows(coupon, maturity)
+    z  = np.array([float(zero_fn(np.array([t]))[0]) for t in times])
+    df = (1.0 + z) ** (-times)
+    return float(np.sum(cf * df))
+
+def bond_analytics(coupon, maturity, zero_fn):
+    times, cf = bond_cashflows(coupon, maturity)
+    z  = np.array([float(zero_fn(np.array([t]))[0]) for t in times])
+    df = (1.0 + z) ** (-times)
+    pv = cf * df
+    px = float(np.sum(pv))
+
+    def pv_diff(y):
+        return float(np.sum(cf * (1.0 + y / 2.0) ** (-times * 2))) - px
+    try:
+        ytm = brentq(pv_diff, -0.5, 5.0, xtol=1e-10)
+    except Exception:
+        ytm = float("nan")
+
+    mac_dur = float(np.sum(times * pv) / px)
+    mod_dur = mac_dur / (1.0 + ytm / 2.0)
+    dv01    = mod_dur * px * 0.0001
+
+    y2       = ytm / 2.0
+    periods  = times * 2
+    conv_sum = sum(c * p * (p + 1) / (1.0 + y2) ** (p + 2) for c, p in zip(cf, periods))
+    conv     = float(conv_sum / px / 4.0)
+
+    return px, ytm, mac_dur, mod_dur, dv01, conv
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("Curve shape")
+    preset      = st.selectbox("Preset", list(_PRESETS.keys()))
+    level_bps   = st.slider("Level shift (bp)", -200, 200, 0, step=5)
+
+    st.divider()
+    st.header("Interpolation")
+    interp_method = st.selectbox(
+        "Method",
+        ["cubic_log_df", "cubic_zero", "log_linear_df", "linear_zero"],
+        format_func=lambda v: {
+            "cubic_log_df":  "Cubic spline on log-DF (recommended)",
+            "cubic_zero":    "Cubic spline on zero rates",
+            "log_linear_df": "Log-linear on DFs",
+            "linear_zero":   "Linear on zero rates",
+        }[v],
+    )
+
+    st.divider()
+    st.header("Shock scenarios")
+    shock_mag = st.slider("Magnitude (bp)", 10, 300, 100, step=10)
+    sel_shocks = st.multiselect(
+        "Active scenarios",
+        options=list(_SHOCK_PROFILES.keys()),
+        default=["parallel_up", "parallel_down", "bear_steepener", "bull_flattener"],
+        format_func=lambda v: v.replace("_", " ").title(),
+    )
+
+    st.divider()
+    st.header("Bond analytics")
+    bond_coupon   = st.number_input("Coupon (%)", 0.0, 20.0, 4.0, 0.25) / 100
+    bond_maturity = st.number_input("Maturity (years)", 0.5, 30.0, 10.0, 0.5)
+
+# ── Build curve ────────────────────────────────────────────────────────────────
+base_vals = np.array(_PRESETS[preset])
+par_vals  = np.clip(base_vals + level_bps / 10000.0, 0.001, None)
+tenors, zeros, dfs = bootstrap(tuple(par_vals.tolist()))
+zero_fn = build_zero_fn(tenors, zeros, dfs, interp_method)
+
+t_grid  = np.linspace(tenors[0], tenors[-1], 300)
+z_grid  = zero_fn(t_grid)
+df_grid = (1.0 + z_grid) ** (-t_grid)
+fw_grid = fwd_curve(zero_fn, t_grid)
+
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+tab_curve, tab_interp, tab_shock, tab_bond = st.tabs([
+    "📐 Zero Curve", "🔀 Interpolation", "⚡ Shock Scenarios", "🏦 Bond Analytics",
+])
+
+# ═══ Tab 1: Zero Curve ════════════════════════════════════════════════════════
+
+with tab_curve:
+    st.subheader("Bootstrapped Zero-Coupon Curve")
+    col1, col2 = st.columns([3, 1])
+
+    with col1:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=t_grid, y=z_grid * 100,
+            name="Zero rate", line=dict(color="#636EFA", width=2.2)))
+        fig.add_trace(go.Scatter(x=tenors, y=zeros * 100,
+            name="Bootstrap nodes", mode="markers",
+            marker=dict(color="#EF553B", size=9, symbol="circle")))
+        fig.update_layout(title="Zero-Coupon Curve",
+            xaxis_title="Tenor (years)", yaxis_title="Rate (%)",
+            template="plotly_white", height=300, margin=dict(t=40, b=40))
+        st.plotly_chart(fig, use_container_width=True)
+
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=t_grid, y=fw_grid * 100,
+            name="Instantaneous forward", line=dict(color="#00CC96", width=2.2)))
+        fig2.add_trace(go.Scatter(x=t_grid, y=z_grid * 100,
+            name="Zero rate", line=dict(color="#636EFA", width=1.2, dash="dot")))
+        fig2.update_layout(title="Instantaneous Forward Curve",
+            xaxis_title="Tenor (years)", yaxis_title="Rate (%)",
+            template="plotly_white", height=300, margin=dict(t=40, b=40))
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with col2:
+        rows = []
+        for lbl, yr in zip(_TENOR_LABELS, _TENOR_YEARS):
+            z_val = float(zero_fn(np.array([yr]))[0])
+            df_val = float((1.0 + z_val) ** (-yr))
+            rows.append({
+                "Tenor": lbl,
+                "Par (%)": round(float(par_vals[_TENOR_YEARS.index(yr)]) * 100, 4),
+                "Zero (%)": round(z_val * 100, 4),
+                "DF": round(df_val, 6),
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+        fig3 = go.Figure()
+        fig3.add_trace(go.Scatter(x=t_grid, y=df_grid,
+            name="DF", line=dict(color="#AB63FA", width=2)))
+        fig3.update_layout(title="Discount Factors",
+            xaxis_title="Tenor (years)", yaxis_title="DF",
+            template="plotly_white", height=260, margin=dict(t=40, b=40))
+        st.plotly_chart(fig3, use_container_width=True)
+
+# ═══ Tab 2: Interpolation ═════════════════════════════════════════════════════
+
+with tab_interp:
+    st.subheader("Interpolation Method Comparison")
+    _methods = ["linear_zero", "cubic_zero", "log_linear_df", "cubic_log_df"]
+    _method_names = {
+        "linear_zero":   "Linear on zero rates",
+        "cubic_zero":    "Cubic spline on zeros",
+        "log_linear_df": "Log-linear on DFs",
+        "cubic_log_df":  "Cubic spline on log-DF",
+    }
+    _m_colors = {
+        "linear_zero":   "#EF553B",
+        "cubic_zero":    "#636EFA",
+        "log_linear_df": "#00CC96",
+        "cubic_log_df":  "#AB63FA",
+    }
+
+    fig_z = go.Figure()
+    fig_f = go.Figure()
+    for m in _methods:
+        fn   = build_zero_fn(tenors, zeros, dfs, m)
+        z_m  = fn(t_grid)
+        fw_m = fwd_curve(fn, t_grid)
+        is_sel = (m == interp_method)
+        w      = 2.5 if is_sel else 1.2
+        d      = "solid" if is_sel else "dot"
+        col    = _m_colors[m]
+        fig_z.add_trace(go.Scatter(x=t_grid, y=z_m * 100, name=_method_names[m],
+            line=dict(color=col, width=w, dash=d)))
+        fig_f.add_trace(go.Scatter(x=t_grid, y=fw_m * 100, name=_method_names[m],
+            line=dict(color=col, width=w, dash=d)))
+    fig_z.add_trace(go.Scatter(x=tenors, y=zeros * 100, name="Bootstrap nodes",
+        mode="markers", marker=dict(color="black", size=7, symbol="x")))
+    fig_z.update_layout(title="Zero-Coupon Rates — All Four Methods",
+        xaxis_title="Tenor (years)", yaxis_title="Rate (%)",
+        template="plotly_white", height=380)
+    fig_f.update_layout(title="Forward Curves — All Four Methods (forward smoothness diagnostic)",
+        xaxis_title="Tenor (years)", yaxis_title="Rate (%)",
+        template="plotly_white", height=380)
+
+    st.plotly_chart(fig_z, use_container_width=True)
+    st.plotly_chart(fig_f, use_container_width=True)
+
+    st.markdown("**Forward curve smoothness by interpolation method:**")
+    method_tbl = pd.DataFrame({
+        "Method":               list(_method_names.values()),
+        "Forward curve shape":  ["Piecewise constant (step function)", "Smooth — may oscillate at nodes", "Piecewise constant (flat-forward)", "Smooth spot + smooth forward"],
+        "Recommended":          ["", "", "", "✓"],
+    })
+    st.dataframe(method_tbl, hide_index=True, use_container_width=True)
+
+# ═══ Tab 3: Shock Scenarios ════════════════════════════════════════════════════
+
+with tab_shock:
+    st.subheader("Rate Shock Scenarios")
+    if not sel_shocks:
+        st.info("Select at least one scenario in the sidebar.")
+    else:
+        fig_sh = go.Figure()
+        fig_sh.add_trace(go.Scatter(x=t_grid, y=z_grid * 100,
+            name="Base", line=dict(color="black", width=2.5)))
+
+        shock_rate_rows = [{"Scenario": "Base",
+            **{lbl: round(float(zero_fn(np.array([yr]))[0]) * 100, 3)
+               for lbl, yr in zip(_TENOR_LABELS, _TENOR_YEARS)}}]
+        pnl_rows = []
+        base_px = bond_price(bond_coupon, bond_maturity, zero_fn)
+
+        for sname in sel_shocks:
+            sfn    = shocked_zero_fn(zero_fn, sname, shock_mag)
+            sz     = sfn(t_grid)
+            label  = sname.replace("_", " ").title()
+            fig_sh.add_trace(go.Scatter(x=t_grid, y=sz * 100, name=label,
+                line=dict(color=_SHOCK_COLORS.get(sname, "#999"), width=1.6, dash="dash")))
+
+            shock_rate_rows.append({"Scenario": label,
+                **{lbl: round(float(sfn(np.array([yr]))[0]) * 100, 3)
+                   for lbl, yr in zip(_TENOR_LABELS, _TENOR_YEARS)}})
+
+            sh_px  = bond_price(bond_coupon, bond_maturity, sfn)
+            pnl    = sh_px - base_px
+            pnl_rows.append({
+                "Scenario":      label,
+                "Base price ($)":    round(base_px, 4),
+                "Shocked price ($)": round(sh_px,   4),
+                "P&L ($)":           round(pnl,     4),
+                "P&L (%)":           round(pnl / base_px * 100, 4),
+            })
+
+        fig_sh.update_layout(
+            title=f"Zero Curves Under Rate Shocks  —  magnitude: {shock_mag} bp",
+            xaxis_title="Tenor (years)", yaxis_title="Rate (%)",
+            template="plotly_white", height=420)
+        st.plotly_chart(fig_sh, use_container_width=True)
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**Zero rates under each scenario (%):**")
+            st.dataframe(pd.DataFrame(shock_rate_rows), hide_index=True, use_container_width=True)
+        with col_b:
+            st.markdown(f"**Bond P&L — {bond_coupon*100:.2f}% coupon, {bond_maturity:.1f}Y maturity:**")
+            st.dataframe(pd.DataFrame(pnl_rows), hide_index=True, use_container_width=True)
+
+        # P&L heatmap
+        if len(sel_shocks) > 1:
+            fig_heat = go.Figure(go.Bar(
+                x=[r["Scenario"] for r in pnl_rows],
+                y=[r["P&L ($)"] for r in pnl_rows],
+                marker_color=["#EF553B" if r["P&L ($)"] < 0 else "#00CC96" for r in pnl_rows],
+            ))
+            fig_heat.update_layout(title="Bond P&L by Scenario ($)",
+                xaxis_title="Scenario", yaxis_title="P&L ($)",
+                template="plotly_white", height=300)
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+# ═══ Tab 4: Bond Analytics ════════════════════════════════════════════════════
+
+with tab_bond:
+    st.subheader(f"Bond Analytics — {bond_coupon*100:.2f}% coupon, {bond_maturity:.1f}Y maturity")
+    px, ytm, mac_d, mod_d, dv01, conv = bond_analytics(bond_coupon, bond_maturity, zero_fn)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Price ($)", f"{px:.4f}")
+        st.metric("YTM", f"{ytm*100:.4f}%")
+    with c2:
+        st.metric("Macaulay Duration", f"{mac_d:.4f} yr")
+        st.metric("Modified Duration", f"{mod_d:.4f} yr")
+    with c3:
+        st.metric("DV01 (per $100 par)", "$" + f"{dv01:.4f}")
+        st.metric("Convexity", f"{conv:.4f}")
+
+    st.divider()
+
+    # Duration + convexity approximation accuracy
+    st.subheader("Duration + Convexity Approximation Accuracy")
+    shocks_bps = [-200, -100, -50, -25, -10, 10, 25, 50, 100, 200]
+    approx_rows = []
+    for bps in shocks_bps:
+        dy      = bps / 10000.0
+        dur_pnl = -mod_d * px * dy
+        cnv_pnl = 0.5 * conv * px * dy ** 2
+        approx  = dur_pnl + cnv_pnl
+        sname   = "parallel_up" if bps > 0 else "parallel_down"
+        sfn     = shocked_zero_fn(zero_fn, sname, abs(bps))
+        act_px  = bond_price(bond_coupon, bond_maturity, sfn)
+        act_pnl = act_px - px
+        approx_rows.append({
+            "Shock (bp)":       bps,
+            "Duration P&L ($)": round(dur_pnl, 4),
+            "Convexity P&L ($)":round(cnv_pnl, 4),
+            "Approx total ($)": round(approx,  4),
+            "Actual P&L ($)":   round(act_pnl, 4),
+            "Error ($)":        round(approx - act_pnl, 6),
+        })
+    st.dataframe(pd.DataFrame(approx_rows), hide_index=True, use_container_width=True)
+
+    st.divider()
+
+    # Key-rate DV01 ladder
+    st.subheader("Key-Rate DV01 Ladder (+1 bp per tenor bucket)")
+    _KR_LABELS = ["1Y", "2Y", "3Y", "5Y", "7Y", "10Y", "20Y", "30Y"]
+    _KR_YEARS  = [1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0]
+    _ALL_T     = sorted(_KR_YEARS)
+
+    kr_rows = []
+    for lbl, target in zip(_KR_LABELS, _KR_YEARS):
+        idx  = _ALL_T.index(target)
+        lo   = _ALL_T[idx - 1] if idx > 0 else 0.0
+        hi   = _ALL_T[idx + 1] if idx < len(_ALL_T) - 1 else _ALL_T[-1] + 5.0
+        sd   = 1.0 / 10000.0
+        _tn  = np.array([0.0, lo, target, hi, _ALL_T[-1]])
+        _sv  = np.array([0.0, 0.0, sd, 0.0, 0.0])
+
+        def kr_fn(t, _tn=_tn, _sv=_sv):
+            t_a = np.asarray(t, float)
+            return np.asarray(zero_fn(t_a), float) + np.interp(t_a, _tn, _sv, left=0.0, right=0.0)
+
+        kr_px  = bond_price(bond_coupon, bond_maturity, kr_fn)
+        kr_dv  = kr_px - px
+        kr_rows.append({"Tenor": lbl, "Key-Rate DV01 ($)": round(kr_dv, 6)})
+
+    kr_df = pd.DataFrame(kr_rows)
+
+    col_tbl, col_fig = st.columns([1, 2])
+    with col_tbl:
+        st.dataframe(kr_df, hide_index=True, use_container_width=True)
+    with col_fig:
+        fig_kr = go.Figure(go.Bar(
+            x=kr_df["Tenor"],
+            y=kr_df["Key-Rate DV01 ($)"],
+            marker_color=["#EF553B" if v < 0 else "#636EFA" for v in kr_df["Key-Rate DV01 ($)"]],
+        ))
+        fig_kr.update_layout(title="Key-Rate DV01 Ladder",
+            xaxis_title="Tenor", yaxis_title="DV01 ($)",
+            template="plotly_white", height=320)
+        st.plotly_chart(fig_kr, use_container_width=True)
+`
+    }
+  },
+  document.getElementById("root")
+);
+  </script>
+</body>
+</html>

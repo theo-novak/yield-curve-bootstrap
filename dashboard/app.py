@@ -70,7 +70,7 @@ with st.sidebar:
     with col2:
         fetch_end = st.date_input("History end", value=date.today())
 
-    if st.button("Fetch & cache data", width='stretch'):
+    if st.button("Fetch & cache data", use_container_width=True):
         if not api_key:
             st.error("Enter your FRED API key first.")
         else:
@@ -181,9 +181,9 @@ with tab_curve:
     with col_left:
         st.plotly_chart(
             plot_zero_curve([interp_curve], labels=[f"{selected_date} ({interp_choice})"]),
-            width='stretch',
+            use_container_width=True,
         )
-        st.plotly_chart(plot_forward_curve(interp_curve), width='stretch')
+        st.plotly_chart(plot_forward_curve(interp_curve), use_container_width=True)
 
     with col_right:
         st.subheader("Bootstrap table")
@@ -192,10 +192,10 @@ with tab_curve:
         df_table["discount_factor"] = df_table["discount_factor"].round(6)
         df_table["continuous_rate"] = (df_table["continuous_rate"] * 100).round(4)
         df_table.columns = ["Tenor (yr)", "Zero Rate (%)", "DF", "Cont. Rate (%)"]
-        st.dataframe(df_table, width='stretch', hide_index=True)
+        st.dataframe(df_table, use_container_width=True, hide_index=True)
 
         st.subheader("Discount factors")
-        st.plotly_chart(plot_discount_factors([interp_curve]), width='stretch')
+        st.plotly_chart(plot_discount_factors([interp_curve]), use_container_width=True)
 
     # Nelson-Siegel fit
     with st.expander("Nelson-Siegel parametric fit"):
@@ -209,7 +209,7 @@ with tab_curve:
         fig_ns.add_trace(go.Scatter(x=t_grid, y=boot_z, mode="lines", name="Bootstrap (interpolated)"))
         fig_ns.add_trace(go.Scatter(x=t_grid, y=ns_z, mode="lines", name="Nelson-Siegel fit", line=dict(dash="dash")))
         fig_ns.update_layout(template="plotly_white", xaxis_title="Maturity (years)", yaxis_title="Zero Rate (%)", hovermode="x unified")
-        st.plotly_chart(fig_ns, width='stretch')
+        st.plotly_chart(fig_ns, use_container_width=True)
 
         params = ns_curve.parameter_table()
         st.table(pd.DataFrame.from_dict(params, orient="index", columns=["Value"]).round(6))
@@ -223,7 +223,7 @@ with tab_interp:
         "All four methods fit the same bootstrap nodes (markers). "
         "Differences are most visible in the short end and between data-sparse tenors."
     )
-    st.plotly_chart(plot_interpolation_comparison(bootstrap), width='stretch')
+    st.plotly_chart(plot_interpolation_comparison(bootstrap), use_container_width=True)
 
     st.subheader("Forward curve by interpolation method")
     from yieldcurve.curve.interpolation import InterpolatedCurve, InterpolationMethod
@@ -250,7 +250,7 @@ with tab_interp:
 
     fig_fwd.update_layout(template="plotly_white", title="Implied Forward Rates by Method",
                            xaxis_title="Maturity (years)", yaxis_title="Forward Rate (%)", hovermode="x unified")
-    st.plotly_chart(fig_fwd, width='stretch')
+    st.plotly_chart(fig_fwd, use_container_width=True)
 
 
 # ═══ Tab 3: Shock Scenarios ══════════════════════════════════════════════════
@@ -263,7 +263,7 @@ with tab_scenarios:
         for name in selected_shocks
     }
 
-    st.plotly_chart(plot_scenario_curves(interp_curve, shocked), width='stretch')
+    st.plotly_chart(plot_scenario_curves(interp_curve, shocked), use_container_width=True)
 
     if shocked:
         st.subheader("Scenario zero rates at key tenors")
@@ -275,7 +275,7 @@ with tab_scenarios:
             rows[name.replace("_", " ").title()] = [c.zero_rate(t) * 100 for t in key_tenors]
 
         df_scenarios = pd.DataFrame(rows, index=key_labels).T.round(4)
-        st.dataframe(df_scenarios, width='stretch')
+        st.dataframe(df_scenarios, use_container_width=True)
 
 
 # ═══ Tab 4: Bond Analytics ═══════════════════════════════════════════════════
@@ -308,7 +308,7 @@ with tab_bond:
             "Total P&L ($)": round(est["total_pnl"], 4),
             "% Change": round(est["pct_change"], 4),
         })
-    st.dataframe(pd.DataFrame(pnl_rows), width='stretch', hide_index=True)
+    st.dataframe(pd.DataFrame(pnl_rows), use_container_width=True, hide_index=True)
 
     st.subheader("Key-rate DV01 ladder")
     dv01_ladder = {}
@@ -316,7 +316,7 @@ with tab_bond:
         shifted = ShockEngine.key_rate_shift(interp_curve, lbl, shift_bps=1.0)
         dv01_ladder[lbl] = bond.price(shifted) - report["price"]
 
-    st.plotly_chart(plot_dv01_ladder(dv01_ladder), width='stretch')
+    st.plotly_chart(plot_dv01_ladder(dv01_ladder), use_container_width=True)
 
 
 # ═══ Tab 5: History ══════════════════════════════════════════════════════════
@@ -335,7 +335,7 @@ with tab_history:
         if tenor_select:
             st.plotly_chart(
                 plot_yield_history(df_hist, tenor_select),
-                width='stretch',
+                use_container_width=True,
             )
 
         st.subheader("Spread: 10Y – 2Y (recession indicator)")
@@ -351,7 +351,7 @@ with tab_history:
             fig_spread.add_hline(y=0, line_color="red", line_dash="dash")
             fig_spread.update_layout(template="plotly_white", xaxis_title="Date",
                                      yaxis_title="Spread (%)", hovermode="x unified")
-            st.plotly_chart(fig_spread, width='stretch')
+            st.plotly_chart(fig_spread, use_container_width=True)
 
 
 # ═══ Tab 6: 3-D Surface ══════════════════════════════════════════════════════
@@ -364,4 +364,4 @@ with tab_surface:
     else:
         max_rows = st.slider("Number of dates (most recent)", 50, min(2000, len(df_hist)), 500, step=50)
         df_slice = df_hist.tail(max_rows)
-        st.plotly_chart(plot_3d_surface(df_slice), width='stretch')
+        st.plotly_chart(plot_3d_surface(df_slice), use_container_width=True)

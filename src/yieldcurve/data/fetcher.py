@@ -109,6 +109,5 @@ def yields_for_date(
 
 def maturity_years_for(labels: list[str]) -> list[float]:
     """Return maturity in years for a list of column labels like ['1M', '2Y']."""
-    label_to_years = {v: k_years for (k_id, k_years), v in
-                      zip(TREASURY_SERIES.items(), _MATURITY_LABEL.values())}
+    label_to_years = {_MATURITY_LABEL[k]: v for k, v in TREASURY_SERIES.items()}
     return [label_to_years[lbl] for lbl in labels]

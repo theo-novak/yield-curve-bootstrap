@@ -36,7 +36,7 @@ def save_yields(df: pd.DataFrame, path: str | Path | None = None) -> None:
     long = df.reset_index().melt(id_vars="date", var_name="label", value_name="yield_pct")
     long = long.dropna(subset=["yield_pct"])
     conn.execute(
-        "INSERT OR REPLACE INTO treasury_yields SELECT * FROM long"
+        "INSERT OR REPLACE INTO treasury_yields (date, label, yield_pct) SELECT date, label, yield_pct FROM long"
     )
     conn.close()
 
